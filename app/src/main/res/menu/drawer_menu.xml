@@ -12,11 +12,5 @@
 
     <group android:id="@+id/group_chat_history"
         android:checkableBehavior="single">
-        <item
-            android:id="@+id/placeholder_chat_1"
-            android:title="Sample Chat 1" />
-        <item
-            android:id="@+id/placeholder_chat_2"
-            android:title="Sample Chat 2" />
     </group>
 </menu>

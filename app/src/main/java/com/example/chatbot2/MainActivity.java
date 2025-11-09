@@ -1,31 +1,39 @@
 package com.example.chatbot2;
 
-import android.Manifest; // <-- Add
-import android.content.Intent; // <-- Add
-import android.content.pm.PackageManager; // <-- Add
+import android.Manifest;
+import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
-import android.net.Uri; // <-- Add
-import android.os.Build; // <-- Add
+import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
-import android.provider.MediaStore; // <-- Add
-import android.speech.RecognizerIntent; // <-- Add
+import android.provider.MediaStore;
+import android.speech.RecognizerIntent;
 import android.util.Log;
+import android.view.Menu; // <-- Add
 import android.view.MenuItem;
 import android.widget.EditText;
 import android.widget.ImageButton;
 import android.widget.Toast;
 
-import androidx.activity.result.ActivityResultLauncher; // <-- Add
-import androidx.activity.result.contract.ActivityResultContracts; // <-- Add
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.ActionBarDrawerToggle;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.appcompat.widget.Toolbar;
-import androidx.core.app.ActivityCompat; // <-- Add
-import androidx.core.content.ContextCompat; // <-- Add
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
 import androidx.drawerlayout.widget.DrawerLayout;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
+
+// --- DB Imports ---
+import com.example.chatbot2.db.AppDatabase;
+import com.example.chatbot2.db.ChatMessageEntity;
+import com.example.chatbot2.db.ChatSession;
+import com.example.chatbot2.db.Converters;
+// --------------------
 
 import com.google.ai.client.generativeai.GenerativeModel;
 import com.google.ai.client.generativeai.java.ChatFutures;
@@ -38,10 +46,10 @@ import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 
-import java.io.IOException; // <-- Add
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale; // <-- Add
+import java.util.Locale;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 
@@ -67,12 +75,16 @@ public class MainActivity extends AppCompatActivity {
     private ChatFutures geminiChat;
     private Executor backgroundExecutor;
 
-    // --- New Global Variables ---
+    // Activity Launchers
     private static final int PERMISSION_REQUEST_CODE = 100;
-    private Bitmap selectedImageBitmap; // To hold the image
+    private Bitmap selectedImageBitmap;
     private ActivityResultLauncher<Intent> imagePickerLauncher;
     private ActivityResultLauncher<Intent> speechToTextLauncher;
 
+    // --- Database variables ---
+    private AppDatabase db;
+    private long currentSessionId = -1;
+    private Menu navMenu;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -108,11 +120,15 @@ public class MainActivity extends AppCompatActivity {
         drawerLayout.addDrawerListener(toggle);
         toggle.syncState();
 
-        // --- Setup Drawer Item Click Listener ---
+        // --- UPDATE Drawer Item Click Listener ---
+        navMenu = navigationView.getMenu(); // Get the menu to dynamically update it
         navigationView.setNavigationItemSelectedListener(item -> {
             int id = item.getItemId();
             if (id == R.id.nav_new_chat) {
-                // TODO: Logic to clear current chat and start a new one
+                startNewChat();
+            } else {
+                // Any other ID must be a chat session ID
+                loadChatSession(id);
             }
             drawerLayout.closeDrawers();
             return true;
@@ -122,26 +138,23 @@ public class MainActivity extends AppCompatActivity {
         setupChatRecyclerView();
         setupGemini();
 
-        // --- ADD THESE ---
+        // --- Setup Launchers & Permissions ---
         initActivityLaunchers();
         requestPermissions();
 
-        // --- Setup Input Button Listeners (UPDATED) ---
+        // --- Setup Database ---
+        db = AppDatabase.getDatabase(this);
+        loadChatHistory(); // Populate the drawer
+        startNewChat(); // Start with a fresh chat
+
         sendButton.setOnClickListener(v -> {
             String message = messageInput.getText().toString().trim();
-
-            // Check if there is either text or an image
             if (!message.isEmpty() || selectedImageBitmap != null) {
-                // Add user message to list
+                // The addMessage call will now also handle saving
                 addMessage(message, selectedImageBitmap, ChatMessage.Sender.USER);
-
-                // Call Gemini
                 callGeminiApi(message, selectedImageBitmap);
-
-                // Clear input and image
                 messageInput.setText("");
                 selectedImageBitmap = null;
-                // TODO: (Optional) Hide an image preview if you add one
             }
         });
 
@@ -152,16 +165,154 @@ public class MainActivity extends AppCompatActivity {
         micButton.setOnClickListener(v -> {
             openSpeechToText();
         });
-
-        // --- Add a welcome message ---
-        addMessage("Hi there! How can I help you today?", null, ChatMessage.Sender.BOT);
     }
 
-    // --- ADD ALL THESE NEW METHODS ---
+    private void startNewChat() {
+        // Clear UI
+        messageList.clear();
+        chatAdapter.notifyDataSetChanged();
+
+        // Reset session state
+        currentSessionId = -1;
+        selectedImageBitmap = null;
+        messageInput.setText("");
+
+        // Reset Gemini's history
+        geminiChat = geminiModel.startChat();
+
+        // Add welcome message (without saving it)
+        ChatMessage welcomeMsg = new ChatMessage("Hi there! How can I help you today?", ChatMessage.Sender.BOT);
+        messageList.add(welcomeMsg);
+        chatAdapter.notifyItemInserted(messageList.size() - 1);
+    }
 
     /**
-     * Initializes the ActivityResultLaunchers for image picking and speech-to-text.
+     * Loads all chat session titles into the navigation drawer.
+     * Runs on a background thread.
      */
+    private void loadChatHistory() {
+        backgroundExecutor.execute(() -> {
+            List<ChatSession> sessions = db.chatDao().getAllSessions();
+            runOnUiThread(() -> {
+                try {
+                    navMenu.removeGroup(R.id.group_chat_history);
+
+                    for (ChatSession session : sessions) {
+                        // Add new items back into the group
+                        navMenu.add(R.id.group_chat_history, (int) session.sessionId, Menu.NONE, session.title)
+                                .setCheckable(true);
+                    }
+                } catch (Exception e) {
+                    Log.e("ChatHistory", "Error updating chat history menu", e);
+                }
+            });
+        });
+    }
+
+    /**
+     * Loads all messages for a specific session from the DB into the UI.
+     * Also reconstructs the Gemini chat history.
+     */
+    private void loadChatSession(long sessionId) {
+        backgroundExecutor.execute(() -> {
+            currentSessionId = sessionId;
+            List<ChatMessageEntity> entities = db.chatDao().getMessagesForSession(sessionId);
+
+            List<ChatMessage> newMessages = new ArrayList<>();
+            List<Content> geminiHistory = new ArrayList<>();
+
+            for (ChatMessageEntity entity : entities) {
+                // Convert DB entity back to app ChatMessage
+                ChatMessage.Sender sender = Converters.toSender(entity.sender);
+                Bitmap image = Converters.toBitmap(entity.image);
+                newMessages.add(new ChatMessage(entity.message, image, sender));
+
+                // Reconstruct Gemini's Content history
+                Content.Builder contentBuilder = new Content.Builder();
+                if (sender == ChatMessage.Sender.USER) {
+                    contentBuilder.setRole("user");
+                } else {
+                    contentBuilder.setRole("model");
+                }
+                contentBuilder.addText(entity.message);
+                if (image != null) {
+                    contentBuilder.addImage(image);
+                }
+                geminiHistory.add(contentBuilder.build());
+            }
+
+            // Start a new Gemini chat WITH the loaded history
+            geminiChat = geminiModel.startChat(geminiHistory);
+
+            // Update UI on main thread
+            runOnUiThread(() -> {
+                messageList.clear();
+                messageList.addAll(newMessages);
+                chatAdapter.notifyDataSetChanged();
+                if (!messageList.isEmpty()) {
+                    chatRecyclerView.scrollToPosition(messageList.size() - 1);
+                }
+            });
+        });
+    }
+
+    /**
+     * Adds a message to the UI list and saves it to the database.
+     */
+    private void addMessage(String message, Bitmap image, ChatMessage.Sender sender) {
+        // 1. Add to UI
+        ChatMessage chatMessage;
+        if (image != null) {
+            chatMessage = new ChatMessage(message, image, sender);
+        } else {
+            chatMessage = new ChatMessage(message, sender);
+        }
+        messageList.add(chatMessage);
+        chatAdapter.notifyItemInserted(messageList.size() - 1);
+        chatRecyclerView.scrollToPosition(messageList.size() - 1);
+
+        // 2. Save to Database (on background thread)
+        backgroundExecutor.execute(() -> {
+            // Check if this is the FIRST user message of a NEW chat
+            if (currentSessionId == -1 && sender == ChatMessage.Sender.USER) {
+                // Create a new session
+                String title = (message != null && !message.isEmpty()) ? message : "Image query";
+                if (title.length() > 30) {
+                    title = title.substring(0, 30) + "..."; // Truncate title
+                }
+
+                ChatSession newSession = new ChatSession(title, System.currentTimeMillis());
+                currentSessionId = db.chatDao().insertSession(newSession); // Get the new ID
+
+                // Refresh the navigation drawer
+                loadChatHistory();
+            }
+
+            // Save the message to the current session
+            byte[] imageBytes = Converters.fromBitmap(image);
+            String senderString = Converters.fromSender(sender);
+            ChatMessageEntity entity = new ChatMessageEntity(
+                    currentSessionId,
+                    message,
+                    imageBytes,
+                    senderString,
+                    System.currentTimeMillis()
+            );
+            db.chatDao().insertMessage(entity);
+        });
+    }
+
+    /**
+     * Adds a temporary loading bubble to the UI.
+     * (This does NOT get saved to the database)
+     */
+    private void addLoadingIndicator() {
+        ChatMessage loadingMessage = new ChatMessage(ChatMessage.Sender.BOT, true);
+        messageList.add(loadingMessage);
+        chatAdapter.notifyItemInserted(messageList.size() - 1);
+        chatRecyclerView.scrollToPosition(messageList.size() - 1);
+    }
+
     private void initActivityLaunchers() {
         // Launcher for picking an image from the gallery
         imagePickerLauncher = registerForActivityResult(
@@ -170,11 +321,8 @@ public class MainActivity extends AppCompatActivity {
                     if (result.getResultCode() == AppCompatActivity.RESULT_OK && result.getData() != null) {
                         Uri imageUri = result.getData().getData();
                         try {
-                            // Convert Uri to Bitmap
                             selectedImageBitmap = MediaStore.Images.Media.getBitmap(this.getContentResolver(), imageUri);
-                            // Show a toast or update UI to show a preview
                             Toast.makeText(this, "Image selected", Toast.LENGTH_SHORT).show();
-                            // TODO: (Optional) Show a small thumbnail preview above the EditText
                         } catch (IOException e) {
                             Log.e("ImagePicker", "Error converting Uri to Bitmap", e);
                             Toast.makeText(this, "Failed to load image", Toast.LENGTH_SHORT).show();
@@ -190,26 +338,19 @@ public class MainActivity extends AppCompatActivity {
                     if (result.getResultCode() == AppCompatActivity.RESULT_OK && result.getData() != null) {
                         ArrayList<String> speechResults = result.getData().getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS);
                         if (speechResults != null && !speechResults.isEmpty()) {
-                            // Set the recognized text into the input field
                             messageInput.setText(speechResults.get(0));
-                            messageInput.setSelection(messageInput.length()); // Move cursor to end
+                            messageInput.setSelection(messageInput.length());
                         }
                     }
                 }
         );
     }
 
-    /**
-     * Launches an Intent to pick an image from the gallery.
-     */
     private void openGallery() {
         Intent intent = new Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI);
         imagePickerLauncher.launch(intent);
     }
 
-    /**
-     * Launches the speech-to-text recognizer.
-     */
     private void openSpeechToText() {
         Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
         intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
@@ -224,29 +365,20 @@ public class MainActivity extends AppCompatActivity {
     }
 
 
-    /**
-     * Checks and requests necessary permissions.
-     */
     private void requestPermissions() {
         List<String> permissionsToRequest = new ArrayList<>();
-
-        // Audio permission
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             permissionsToRequest.add(Manifest.permission.RECORD_AUDIO);
         }
-
-        // Image permission (depends on Android version)
         String imagePermission;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) { // API 33+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             imagePermission = Manifest.permission.READ_MEDIA_IMAGES;
-        } else { // API 32 and below
+        } else {
             imagePermission = Manifest.permission.READ_EXTERNAL_STORAGE;
         }
-
         if (ContextCompat.checkSelfPermission(this, imagePermission) != PackageManager.PERMISSION_GRANTED) {
             permissionsToRequest.add(imagePermission);
         }
-
         if (!permissionsToRequest.isEmpty()) {
             ActivityCompat.requestPermissions(
                     this,
@@ -256,14 +388,10 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /**
-     * Handles the result of the permission request.
-     */
     @Override
     public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == PERMISSION_REQUEST_CODE) {
-            // Check if all requested permissions were granted
             for (int result : grantResults) {
                 if (result != PackageManager.PERMISSION_GRANTED) {
                     Toast.makeText(this, "Permission denied. Some features may not work.", Toast.LENGTH_SHORT).show();
@@ -274,32 +402,26 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    // --- Unchanged Methods from Part 3 ---
-
     private void setupGemini() {
-        // Create an executor for background tasks
         backgroundExecutor = Executors.newSingleThreadExecutor();
         Log.d("GeminiAPI_KeyCheck", "The API Key being used is: [" + BuildConfig.GEMINI_API_KEY + "]");
 
-        // Build GenerationConfig (optional, but good to have)
         GenerationConfig.Builder configBuilder = new GenerationConfig.Builder();
         configBuilder.temperature = 0.9f;
         configBuilder.topK = 1;
         configBuilder.topP = 1.0f;
 
-        // Initialize the GenerativeModel
         GenerativeModel gm = new GenerativeModel(
-                "gemini-2.5-flash", // Correct model
+                "gemini-2.5-flash",
                 BuildConfig.GEMINI_API_KEY,
                 configBuilder.build()
         );
 
         geminiModel = GenerativeModelFutures.from(gm);
-        geminiChat = geminiModel.startChat();
     }
 
     private void callGeminiApi(String message, Bitmap image) {
-        addLoadingIndicator(); // Show loading bubble
+        addLoadingIndicator();
 
         Content.Builder contentBuilder = new Content.Builder();
         contentBuilder.setRole("user");
@@ -317,6 +439,7 @@ public class MainActivity extends AppCompatActivity {
                 String responseText = result.getText();
                 runOnUiThread(() -> {
                     removeLoadingIndicator();
+                    // Add and save the bot's response
                     addMessage(responseText, null, ChatMessage.Sender.BOT);
                 });
             }
@@ -339,25 +462,6 @@ public class MainActivity extends AppCompatActivity {
         chatRecyclerView.setAdapter(chatAdapter);
     }
 
-    private void addMessage(String message, Bitmap image, ChatMessage.Sender sender) {
-        ChatMessage chatMessage;
-        if (image != null) {
-            chatMessage = new ChatMessage(message, image, sender);
-        } else {
-            chatMessage = new ChatMessage(message, sender);
-        }
-        messageList.add(chatMessage);
-        chatAdapter.notifyItemInserted(messageList.size() - 1);
-        chatRecyclerView.scrollToPosition(messageList.size() - 1);
-    }
-
-    private void addLoadingIndicator() {
-        ChatMessage loadingMessage = new ChatMessage(ChatMessage.Sender.BOT, true);
-        messageList.add(loadingMessage);
-        chatAdapter.notifyItemInserted(messageList.size() - 1);
-        chatRecyclerView.scrollToPosition(messageList.size() - 1);
-    }
-
     private void removeLoadingIndicator() {
         if (messageList.isEmpty()) return;
         int lastPosition = messageList.size() - 1;
@@ -367,10 +471,6 @@ public class MainActivity extends AppCompatActivity {
             messageList.remove(lastPosition);
             chatAdapter.notifyItemRemoved(lastPosition);
         }
-    }
-
-    private void updateLastBotMessage(String newText) {
-        // ... (This method isn't used right now, but good to keep for streaming)
     }
 
     @Override
