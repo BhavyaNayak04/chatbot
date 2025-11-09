@@ -1,6 +1,8 @@
 package com.example.chatbot2;
 
+import android.graphics.Bitmap;
 import android.os.Bundle;
+import android.util.Log;
 import android.view.MenuItem;
 import android.widget.EditText;
 import android.widget.ImageButton;
@@ -11,13 +13,24 @@ import androidx.appcompat.app.ActionBarDrawerToggle;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.appcompat.widget.Toolbar;
 import androidx.drawerlayout.widget.DrawerLayout;
-import androidx.recyclerview.widget.LinearLayoutManager; // <-- Add this
+import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
+import com.google.ai.client.generativeai.GenerativeModel;
+import com.google.ai.client.generativeai.java.ChatFutures;
+import com.google.ai.client.generativeai.java.GenerativeModelFutures;
+import com.google.ai.client.generativeai.type.Content;
+import com.google.ai.client.generativeai.type.GenerateContentResponse;
+import com.google.ai.client.generativeai.type.GenerationConfig;
+import com.google.common.util.concurrent.FutureCallback;
+import com.google.common.util.concurrent.Futures;
+import com.google.common.util.concurrent.ListenableFuture;
 import com.google.android.material.navigation.NavigationView;
 
-import java.util.ArrayList; // <-- Add this
-import java.util.List; // <-- Add this
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -33,9 +46,13 @@ public class MainActivity extends AppCompatActivity {
     private ImageButton attachButton;
     private ImageButton micButton;
 
-    // --- Add these ---
     private List<ChatMessage> messageList;
     private ChatAdapter chatAdapter;
+
+    // Gemini components
+    private GenerativeModelFutures geminiModel;
+    private ChatFutures geminiChat;
+    private Executor backgroundExecutor;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -88,25 +105,17 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
-        // --- ADD/UPDATE THIS SECTION ---
+        // --- Setup Chat & Gemini ---
         setupChatRecyclerView();
+        setupGemini();
 
         // --- Setup Input Button Listeners ---
         sendButton.setOnClickListener(v -> {
             String message = messageInput.getText().toString().trim();
             if (!message.isEmpty()) {
-                // Add user message to list
-                addMessage(message, ChatMessage.Sender.USER);
+                addMessage(message, null, ChatMessage.Sender.USER); // null for image
                 messageInput.setText("");
-
-                // TODO: Call Gemini API
-                // For now, let's just add a dummy loading and response
-                addLoadingIndicator();
-
-                // (This is where the API call will go)
-                // (After API call, remove loading and add bot response)
-                // removeLoadingIndicator();
-                // addMessage("This is a bot response.", ChatMessage.Sender.BOT);
+                callGeminiApi(message, null); // null for image
             }
         });
 
@@ -121,10 +130,74 @@ public class MainActivity extends AppCompatActivity {
         });
 
         // --- Add a welcome message ---
-        addMessage("Hi there! How can I help you today?", ChatMessage.Sender.BOT);
+        addMessage("Hi there! How can I help you today?", null, ChatMessage.Sender.BOT);
     }
 
-    // --- ADD THESE NEW METHODS ---
+    private void setupGemini() {
+        // Create an executor for background tasks
+        backgroundExecutor = Executors.newSingleThreadExecutor();
+
+        // Build GenerationConfig (optional, but good to have)
+        GenerationConfig.Builder configBuilder = new GenerationConfig.Builder();
+        configBuilder.temperature = 0.9f;
+        configBuilder.topK = 1;
+        configBuilder.topP = 1.0f;
+
+        // Initialize the GenerativeModel
+        GenerativeModel gm = new GenerativeModel(
+                "gemini-2.5-flash",
+                BuildConfig.GEMINI_API_KEY,
+                configBuilder.build()
+        );
+
+        // Wrap the model in a Futures-based class for Java-friendly async calls
+        geminiModel = GenerativeModelFutures.from(gm);
+
+        // Start a new chat session
+        geminiChat = geminiModel.startChat();
+        Log.d("GeminiAPI_KeyCheck", "The API Key being used is: [" + BuildConfig.GEMINI_API_KEY + "]");
+    }
+
+    private void callGeminiApi(String message, Bitmap image) {
+        addLoadingIndicator(); // Show loading bubble
+
+        // Create the content
+        Content.Builder contentBuilder = new Content.Builder();
+        contentBuilder.setRole("user");
+        contentBuilder.addText(message);
+        if (image != null) {
+            contentBuilder.addImage(image);
+        }
+        Content content = contentBuilder.build();
+
+        // --- Send message to Gemini (async) ---
+        ListenableFuture<GenerateContentResponse> responseFuture = geminiChat.sendMessage(content);
+
+        // Add a callback to handle the response
+        Futures.addCallback(responseFuture, new FutureCallback<GenerateContentResponse>() {
+            @Override
+            public void onSuccess(GenerateContentResponse result) {
+                // Get the text from the response
+                String responseText = result.getText();
+
+                // Update the UI on the main thread
+                runOnUiThread(() -> {
+                    removeLoadingIndicator();
+                    addMessage(responseText, null, ChatMessage.Sender.BOT);
+                });
+            }
+
+            @Override
+            public void onFailure(Throwable t) {
+                // Handle the error
+                Log.e("GeminiAPI", "Error: " + t.getMessage(), t);
+                runOnUiThread(() -> {
+                    removeLoadingIndicator();
+                    addMessage("Sorry, something went wrong. Please try again.", null, ChatMessage.Sender.BOT);
+                });
+            }
+        }, backgroundExecutor);
+    }
 
     private void setupChatRecyclerView() {
         messageList = new ArrayList<>();
@@ -133,24 +206,18 @@ public class MainActivity extends AppCompatActivity {
         chatRecyclerView.setAdapter(chatAdapter);
     }
 
-    // Add a text message to the list
-    private void addMessage(String message, ChatMessage.Sender sender) {
-        ChatMessage chatMessage = new ChatMessage(message, sender);
+    // Updated addMessage to handle both text and image
+    private void addMessage(String message, Bitmap image, ChatMessage.Sender sender) {
+        ChatMessage chatMessage;
+        if (image != null) {
+            chatMessage = new ChatMessage(message, image, sender);
+        } else {
+            chatMessage = new ChatMessage(message, sender);
+        }
         messageList.add(chatMessage);
         chatAdapter.notifyItemInserted(messageList.size() - 1);
         chatRecyclerView.scrollToPosition(messageList.size() - 1); // Scroll to bottom
     }
-
-    // Add an image message to the list
-    // We will use this in a later step
-    /*
-    private void addImageMessage(String message, Bitmap image, ChatMessage.Sender sender) {
-        ChatMessage chatMessage = new ChatMessage(message, image, sender);
-        messageList.add(chatMessage);
-        chatAdapter.notifyItemInserted(messageList.size() - 1);
-        chatRecyclerView.scrollToPosition(messageList.size() - 1);
-    }
-    */
 
     // Add a loading indicator
     private void addLoadingIndicator() {
