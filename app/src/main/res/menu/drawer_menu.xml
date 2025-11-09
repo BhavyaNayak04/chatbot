@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    tools:showIn="navigation_view">
+
+    <group android:id="@+id/group_new_chat">
+        <item
+            android:id="@+id/nav_new_chat"
+            android:icon="@drawable/ic_new_chat"
+            android:title="New Chat" />
+    </group>
+
+    <group android:id="@+id/group_chat_history"
+        android:checkableBehavior="single">
+        <item
+            android:id="@+id/placeholder_chat_1"
+            android:title="Sample Chat 1" />
+        <item
+            android:id="@+id/placeholder_chat_2"
+            android:title="Sample Chat 2" />
+    </group>
+</menu>
