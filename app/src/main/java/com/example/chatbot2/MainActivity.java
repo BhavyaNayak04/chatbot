@@ -1,6 +1,9 @@
 package com.example.chatbot2;
 
 import android.Manifest;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
@@ -9,8 +12,9 @@ import android.os.Build;
 import android.os.Bundle;
 import android.provider.MediaStore;
 import android.speech.RecognizerIntent;
+import android.speech.tts.TextToSpeech; // <-- Add
 import android.util.Log;
-import android.view.Menu; // <-- Add
+import android.view.Menu;
 import android.view.MenuItem;
 import android.widget.EditText;
 import android.widget.ImageButton;
@@ -53,7 +57,8 @@ import java.util.Locale;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 
-public class MainActivity extends AppCompatActivity {
+// --- UPDATE CLASS SIGNATURE ---
+public class MainActivity extends AppCompatActivity implements ChatAdapter.BotMessageListener {
 
     private DrawerLayout drawerLayout;
     private NavigationView navigationView;
@@ -81,10 +86,15 @@ public class MainActivity extends AppCompatActivity {
     private ActivityResultLauncher<Intent> imagePickerLauncher;
     private ActivityResultLauncher<Intent> speechToTextLauncher;
 
-    // --- Database variables ---
+    // Database variables
     private AppDatabase db;
     private long currentSessionId = -1;
     private Menu navMenu;
+
+    // --- ADD THESE NEW VARIABLES ---
+    private TextToSpeech textToSpeech;
+    private ClipboardManager clipboardManager;
+    // -------------------------------
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -93,9 +103,9 @@ public class MainActivity extends AppCompatActivity {
 
         // --- Initialize Views ---
         drawerLayout = findViewById(R.id.drawer_layout);
+        // ... (rest of view initializations) ...
         navigationView = findViewById(R.id.nav_view);
         toolbar = findViewById(R.id.toolbar);
-
         chatRecyclerView = findViewById(R.id.chat_recycler_view);
         messageInput = findViewById(R.id.message_input);
         sendButton = findViewById(R.id.send_button);
@@ -104,6 +114,7 @@ public class MainActivity extends AppCompatActivity {
 
         // --- Setup Toolbar ---
         setSupportActionBar(toolbar);
+        // ... (rest of toolbar setup) ...
         if (getSupportActionBar() != null) {
             getSupportActionBar().setDisplayHomeAsUpEnabled(true);
             getSupportActionBar().setHomeAsUpIndicator(R.drawable.ic_menu);
@@ -117,17 +128,15 @@ public class MainActivity extends AppCompatActivity {
                 R.string.navigation_drawer_open,
                 R.string.navigation_drawer_close
         );
+        // ... (rest of drawer setup) ...
         drawerLayout.addDrawerListener(toggle);
         toggle.syncState();
-
-        // --- UPDATE Drawer Item Click Listener ---
-        navMenu = navigationView.getMenu(); // Get the menu to dynamically update it
+        navMenu = navigationView.getMenu();
         navigationView.setNavigationItemSelectedListener(item -> {
             int id = item.getItemId();
             if (id == R.id.nav_new_chat) {
                 startNewChat();
             } else {
-                // Any other ID must be a chat session ID
                 loadChatSession(id);
             }
             drawerLayout.closeDrawers();
@@ -135,7 +144,7 @@ public class MainActivity extends AppCompatActivity {
         });
 
         // --- Setup Chat & Gemini ---
-        setupChatRecyclerView();
+        setupChatRecyclerView(); // This MUST be before setupGemini
         setupGemini();
 
         // --- Setup Launchers & Permissions ---
@@ -144,28 +153,84 @@ public class MainActivity extends AppCompatActivity {
 
         // --- Setup Database ---
         db = AppDatabase.getDatabase(this);
-        loadChatHistory(); // Populate the drawer
-        startNewChat(); // Start with a fresh chat
+        loadChatHistory();
+        startNewChat();
 
+        // --- Setup Input Button Listeners ---
         sendButton.setOnClickListener(v -> {
             String message = messageInput.getText().toString().trim();
             if (!message.isEmpty() || selectedImageBitmap != null) {
-                // The addMessage call will now also handle saving
                 addMessage(message, selectedImageBitmap, ChatMessage.Sender.USER);
                 callGeminiApi(message, selectedImageBitmap);
                 messageInput.setText("");
                 selectedImageBitmap = null;
             }
         });
+        attachButton.setOnClickListener(v -> openGallery());
+        micButton.setOnClickListener(v -> openSpeechToText());
 
-        attachButton.setOnClickListener(v -> {
-            openGallery();
-        });
+        // --- ADD THIS: Initialize TTS and Clipboard ---
+        initTextToSpeech();
+        clipboardManager = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        // ------------------------------------------
+    }
 
-        micButton.setOnClickListener(v -> {
-            openSpeechToText();
+    // --- ADD THIS METHOD ---
+    private void initTextToSpeech() {
+        textToSpeech = new TextToSpeech(this, status -> {
+            if (status == TextToSpeech.SUCCESS) {
+                int result = textToSpeech.setLanguage(Locale.US);
+                if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
+                    Log.e("TTS", "Language not supported");
+                    Toast.makeText(this, "TTS Language not supported.", Toast.LENGTH_SHORT).show();
+                }
+            } else {
+                Log.e("TTS", "Initialization failed");
+                Toast.makeText(this, "TTS Initialization failed.", Toast.LENGTH_SHORT).show();
+            }
         });
     }
+
+    // --- ADD THIS METHOD: Handle TTS Shutdown ---
+    @Override
+    protected void onDestroy() {
+        if (textToSpeech != null) {
+            textToSpeech.stop();
+            textToSpeech.shutdown();
+        }
+        super.onDestroy();
+    }
+
+    // --- ADD THESE: Implement the Listener Methods ---
+    @Override
+    public void onSpeakClicked(String text) {
+        if (textToSpeech != null && !text.isEmpty()) {
+            textToSpeech.speak(text, TextToSpeech.QUEUE_FLUSH, null, null);
+        }
+    }
+
+    @Override
+    public void onCopyClicked(String text) {
+        if (clipboardManager != null && !text.isEmpty()) {
+            ClipData clip = ClipData.newPlainText("ChatBot Message", text);
+            clipboardManager.setPrimaryClip(clip);
+            Toast.makeText(this, "Copied to clipboard", Toast.LENGTH_SHORT).show();
+        }
+    }
+    // -----------------------------------------------
+
+    // --- UPDATE setupChatRecyclerView ---
+    private void setupChatRecyclerView() {
+        messageList = new ArrayList<>();
+        // Pass 'this' as the listener
+        chatAdapter = new ChatAdapter(messageList, this);
+        chatRecyclerView.setLayoutManager(new LinearLayoutManager(this));
+        chatRecyclerView.setAdapter(chatAdapter);
+    }
+    // ------------------------------------
+
+
+    // --- (All other methods are unchanged) ---
 
     private void startNewChat() {
         // Clear UI
@@ -186,10 +251,6 @@ public class MainActivity extends AppCompatActivity {
         chatAdapter.notifyItemInserted(messageList.size() - 1);
     }
 
-    /**
-     * Loads all chat session titles into the navigation drawer.
-     * Runs on a background thread.
-     */
     private void loadChatHistory() {
         backgroundExecutor.execute(() -> {
             List<ChatSession> sessions = db.chatDao().getAllSessions();
@@ -198,7 +259,6 @@ public class MainActivity extends AppCompatActivity {
                     navMenu.removeGroup(R.id.group_chat_history);
 
                     for (ChatSession session : sessions) {
-                        // Add new items back into the group
                         navMenu.add(R.id.group_chat_history, (int) session.sessionId, Menu.NONE, session.title)
                                 .setCheckable(true);
                     }
@@ -209,10 +269,6 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
-    /**
-     * Loads all messages for a specific session from the DB into the UI.
-     * Also reconstructs the Gemini chat history.
-     */
     private void loadChatSession(long sessionId) {
         backgroundExecutor.execute(() -> {
             currentSessionId = sessionId;
@@ -222,12 +278,10 @@ public class MainActivity extends AppCompatActivity {
             List<Content> geminiHistory = new ArrayList<>();
 
             for (ChatMessageEntity entity : entities) {
-                // Convert DB entity back to app ChatMessage
                 ChatMessage.Sender sender = Converters.toSender(entity.sender);
                 Bitmap image = Converters.toBitmap(entity.image);
                 newMessages.add(new ChatMessage(entity.message, image, sender));
 
-                // Reconstruct Gemini's Content history
                 Content.Builder contentBuilder = new Content.Builder();
                 if (sender == ChatMessage.Sender.USER) {
                     contentBuilder.setRole("user");
@@ -241,10 +295,8 @@ public class MainActivity extends AppCompatActivity {
                 geminiHistory.add(contentBuilder.build());
             }
 
-            // Start a new Gemini chat WITH the loaded history
             geminiChat = geminiModel.startChat(geminiHistory);
 
-            // Update UI on main thread
             runOnUiThread(() -> {
                 messageList.clear();
                 messageList.addAll(newMessages);
@@ -256,11 +308,7 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
-    /**
-     * Adds a message to the UI list and saves it to the database.
-     */
     private void addMessage(String message, Bitmap image, ChatMessage.Sender sender) {
-        // 1. Add to UI
         ChatMessage chatMessage;
         if (image != null) {
             chatMessage = new ChatMessage(message, image, sender);
@@ -271,24 +319,19 @@ public class MainActivity extends AppCompatActivity {
         chatAdapter.notifyItemInserted(messageList.size() - 1);
         chatRecyclerView.scrollToPosition(messageList.size() - 1);
 
-        // 2. Save to Database (on background thread)
         backgroundExecutor.execute(() -> {
-            // Check if this is the FIRST user message of a NEW chat
             if (currentSessionId == -1 && sender == ChatMessage.Sender.USER) {
-                // Create a new session
                 String title = (message != null && !message.isEmpty()) ? message : "Image query";
                 if (title.length() > 30) {
-                    title = title.substring(0, 30) + "..."; // Truncate title
+                    title = title.substring(0, 30) + "...";
                 }
 
                 ChatSession newSession = new ChatSession(title, System.currentTimeMillis());
-                currentSessionId = db.chatDao().insertSession(newSession); // Get the new ID
+                currentSessionId = db.chatDao().insertSession(newSession);
 
-                // Refresh the navigation drawer
                 loadChatHistory();
             }
 
-            // Save the message to the current session
             byte[] imageBytes = Converters.fromBitmap(image);
             String senderString = Converters.fromSender(sender);
             ChatMessageEntity entity = new ChatMessageEntity(
@@ -302,10 +345,6 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
-    /**
-     * Adds a temporary loading bubble to the UI.
-     * (This does NOT get saved to the database)
-     */
     private void addLoadingIndicator() {
         ChatMessage loadingMessage = new ChatMessage(ChatMessage.Sender.BOT, true);
         messageList.add(loadingMessage);
@@ -314,7 +353,6 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void initActivityLaunchers() {
-        // Launcher for picking an image from the gallery
         imagePickerLauncher = registerForActivityResult(
                 new ActivityResultContracts.StartActivityForResult(),
                 result -> {
@@ -331,7 +369,6 @@ public class MainActivity extends AppCompatActivity {
                 }
         );
 
-        // Launcher for speech-to-text
         speechToTextLauncher = registerForActivityResult(
                 new ActivityResultContracts.StartActivityForResult(),
                 result -> {
@@ -439,7 +476,6 @@ public class MainActivity extends AppCompatActivity {
                 String responseText = result.getText();
                 runOnUiThread(() -> {
                     removeLoadingIndicator();
-                    // Add and save the bot's response
                     addMessage(responseText, null, ChatMessage.Sender.BOT);
                 });
             }
@@ -453,13 +489,6 @@ public class MainActivity extends AppCompatActivity {
                 });
             }
         }, backgroundExecutor);
-    }
-
-    private void setupChatRecyclerView() {
-        messageList = new ArrayList<>();
-        chatAdapter = new ChatAdapter(messageList);
-        chatRecyclerView.setLayoutManager(new LinearLayoutManager(this));
-        chatRecyclerView.setAdapter(chatAdapter);
     }
 
     private void removeLoadingIndicator() {

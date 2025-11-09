@@ -3,7 +3,9 @@ package com.example.chatbot2;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.ImageButton;
 import android.widget.ImageView;
+import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 
@@ -21,13 +23,24 @@ public class ChatAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
 
     private List<ChatMessage> chatMessages;
 
-    public ChatAdapter(List<ChatMessage> chatMessages) {
-        this.chatMessages = chatMessages;
+    // --- ADD THIS INTERFACE ---
+    private BotMessageListener listener;
+    public interface BotMessageListener {
+        void onSpeakClicked(String text);
+        void onCopyClicked(String text);
     }
+    // -------------------------
+
+    // --- UPDATE THE CONSTRUCTOR ---
+    public ChatAdapter(List<ChatMessage> chatMessages, BotMessageListener listener) {
+        this.chatMessages = chatMessages;
+        this.listener = listener; // Initialize the listener
+    }
+    // -------------------------
 
     // --- ViewHolder Classes ---
 
-    // ViewHolder for User messages
+    // ViewHolder for User messages (Unchanged)
     public static class UserMessageViewHolder extends RecyclerView.ViewHolder {
         TextView messageText;
         ImageView image;
@@ -39,19 +52,27 @@ public class ChatAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         }
     }
 
-    // ViewHolder for Bot messages
+    // --- UPDATE Bot ViewHolder ---
     public static class BotMessageViewHolder extends RecyclerView.ViewHolder {
         TextView messageText;
         ImageView image;
         ProgressBar loadingIndicator;
+        LinearLayout botActionsLayout; // The new layout
+        ImageButton speakButton;
+        ImageButton copyButton;
 
         public BotMessageViewHolder(@NonNull View itemView) {
             super(itemView);
             messageText = itemView.findViewById(R.id.bot_message_text);
             image = itemView.findViewById(R.id.bot_image);
             loadingIndicator = itemView.findViewById(R.id.loading_indicator);
+            // Find the new views
+            botActionsLayout = itemView.findViewById(R.id.bot_actions_layout);
+            speakButton = itemView.findViewById(R.id.speak_button);
+            copyButton = itemView.findViewById(R.id.copy_button);
         }
     }
+    // -------------------------
 
     // --- Adapter Methods ---
 
@@ -78,22 +99,20 @@ public class ChatAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         }
     }
 
+    // --- UPDATE onBindViewHolder ---
     @Override
     public void onBindViewHolder(@NonNull RecyclerView.ViewHolder holder, int position) {
         ChatMessage message = chatMessages.get(position);
 
         if (getItemViewType(position) == VIEW_TYPE_USER) {
+            // ... (User holder logic is unchanged)
             UserMessageViewHolder userHolder = (UserMessageViewHolder) holder;
-
-            // Handle text
             if (message.getMessage() != null && !message.getMessage().isEmpty()) {
                 userHolder.messageText.setText(message.getMessage());
                 userHolder.messageText.setVisibility(View.VISIBLE);
             } else {
                 userHolder.messageText.setVisibility(View.GONE);
             }
-
-            // Handle image
             if (message.getImage() != null) {
                 userHolder.image.setImageBitmap(message.getImage());
                 userHolder.image.setVisibility(View.VISIBLE);
@@ -109,21 +128,31 @@ public class ChatAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
                 botHolder.loadingIndicator.setVisibility(View.VISIBLE);
                 botHolder.messageText.setVisibility(View.GONE);
                 botHolder.image.setVisibility(View.GONE);
+                botHolder.botActionsLayout.setVisibility(View.GONE); // Hide buttons when loading
             } else {
                 botHolder.loadingIndicator.setVisibility(View.GONE);
 
-                // Handle text
+                // Show buttons and text only if there is text
                 if (message.getMessage() != null && !message.getMessage().isEmpty()) {
-                    // TODO: Add Markdown support here later
                     botHolder.messageText.setText(message.getMessage());
                     botHolder.messageText.setVisibility(View.VISIBLE);
+                    botHolder.botActionsLayout.setVisibility(View.VISIBLE); // Show buttons
+
+                    // Set click listeners
+                    botHolder.speakButton.setOnClickListener(v ->
+                            listener.onSpeakClicked(message.getMessage())
+                    );
+                    botHolder.copyButton.setOnClickListener(v ->
+                            listener.onCopyClicked(message.getMessage())
+                    );
+
                 } else {
                     botHolder.messageText.setVisibility(View.GONE);
+                    botHolder.botActionsLayout.setVisibility(View.GONE); // Hide buttons if no text
                 }
 
-                // Handle image
+                // Handle image (unchanged)
                 if (message.getImage() != null) {
-                    // Using Glide to load bitmap
                     Glide.with(botHolder.itemView.getContext())
                             .load(message.getImage())
                             .into(botHolder.image);
@@ -134,6 +163,7 @@ public class ChatAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
             }
         }
     }
+    // -------------------------
 
     @Override
     public int getItemCount() {
